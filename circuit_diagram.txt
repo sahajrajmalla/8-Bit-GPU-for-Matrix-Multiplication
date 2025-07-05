@@ -1,0 +1,172 @@
+// GPU_Top.sv - Synthesizable version
+module GPU_Top (
+    input clk,
+    input reset,
+    input [127:0] data_in,  // Packed input data (16 bytes)
+    input load_data,        // Pulse to load input data
+    output [127:0] data_out // Packed output data (16 bytes)
+);
+
+    // Memory module
+    wire [15:0] we;
+    wire [127:0] wdata;
+    Memory mem (
+        .clk(clk),
+        .reset(reset),
+        .data_in(data_in),
+        .load_data(load_data),
+        .we(we),
+        .wdata(wdata),
+        .data_out(data_out)
+    );
+
+    // Controller module
+    wire store_result;
+    Controller ctrl (
+        .clk(clk),
+        .reset(reset),
+        .store_result(store_result)
+    );
+
+    // Processing Units
+    wire [15:0] pu00_result, pu01_result, pu10_result, pu11_result;
+    
+    PU pu00 (.clk(clk), .reset(reset), .mem_data(data_out), .result(pu00_result));
+    PU pu01 (.clk(clk), .reset(reset), .mem_data(data_out), .result(pu01_result));
+    PU pu10 (.clk(clk), .reset(reset), .mem_data(data_out), .result(pu10_result));
+    PU pu11 (.clk(clk), .reset(reset), .mem_data(data_out), .result(pu11_result));
+
+    // Connect PU results to memory write data
+    assign wdata = {pu11_result, pu10_result, pu01_result, pu00_result};
+    
+    // Write enable for result locations (upper 8 bytes)
+    assign we = store_result ? 16'hFF00 : 16'h0000;
+
+endmodule
+
+module Memory (
+    input clk,
+    input reset,
+    input [127:0] data_in,
+    input load_data,
+    input [15:0] we,
+    input [127:0] wdata,
+    output reg [127:0] data_out
+);
+
+    reg [7:0] mem [0:15];
+    
+    always @(posedge clk) begin
+        if (reset) begin
+            // Initialize memory to 0
+            for (int i = 0; i < 16; i++) begin
+                mem[i] <= 8'h00;
+            end
+        end
+        else if (load_data) begin
+            // Load input data
+            {mem[15], mem[14], mem[13], mem[12],
+             mem[11], mem[10], mem[9], mem[8],
+             mem[7], mem[6], mem[5], mem[4],
+             mem[3], mem[2], mem[1], mem[0]} <= data_in;
+        end
+        else begin
+            // Write to memory locations
+            for (int i = 0; i < 16; i++) begin
+                if (we[i]) begin
+                    mem[i] <= wdata[i*8 +: 8];
+                end
+            end
+        end
+    end
+    
+    // Continuous output
+    always @* begin
+        data_out = {mem[15], mem[14], mem[13], mem[12],
+                    mem[11], mem[10], mem[9], mem[8],
+                    mem[7], mem[6], mem[5], mem[4],
+                    mem[3], mem[2], mem[1], mem[0]};
+    end
+endmodule
+
+module Controller (
+    input clk,
+    input reset,
+    output reg store_result
+);
+
+    reg [1:0] state;
+    reg [1:0] counter;
+    
+    // State definitions
+    localparam IDLE     = 2'd0;
+    localparam COMPUTE  = 2'd1;
+    localparam STORE    = 2'd2;
+
+    always @(posedge clk or posedge reset) begin
+        if (reset) begin
+            state <= IDLE;
+            counter <= 0;
+            store_result <= 0;
+        end
+        else begin
+            store_result <= 0;
+            
+            case (state)
+                IDLE: begin
+                    state <= COMPUTE;
+                    counter <= 0;
+                end
+                
+                COMPUTE: begin
+                    if (counter < 1) begin  // 1 cycle computation
+                        counter <= counter + 1;
+                    end
+                    else begin
+                        state <= STORE;
+                    end
+                end
+                
+                STORE: begin
+                    store_result <= 1;
+                    state <= IDLE;
+                end
+            endcase
+        end
+    end
+endmodule
+
+module PU (
+    input clk,
+    input reset,
+    input [127:0] mem_data,  // Packed memory data
+    output reg [15:0] result
+);
+
+    // Fixed indices for this PU
+    wire [1:0] i = 0;  // Example: PU00 has i=0, j=0
+    wire [1:0] j = 0;
+    
+    // Matrix multiplication logic
+    reg [15:0] accumulator;
+    reg [1:0] k;
+    
+    // Memory byte extraction
+    wire [7:0] a0 = mem_data[8*{i,1'b0} +: 8];  // A[i][0]
+    wire [7:0] a1 = mem_data[8*{i,1'b1} +: 8];  // A[i][1]
+    wire [7:0] b0 = mem_data[8*(4 + {1'b0,j}) +: 8]; // B[0][j]
+    wire [7:0] b1 = mem_data[8*(4 + {1'b1,j}) +: 8]; // B[1][j]
+
+    always @(posedge clk or posedge reset) begin
+        if (reset) begin
+            accumulator <= 0;
+            k <= 0;
+            result <= 0;
+        end
+        else begin
+            // Single cycle multiply-accumulate
+            accumulator <= (a0 * b0) + (a1 * b1);
+            result <= accumulator;
+        end
+    end
+endmodule
